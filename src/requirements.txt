@@ -17,8 +17,8 @@ seaborn==0.13.2
 
 # Extra dependencies for your app
 shap==0.44.1
-streamlit==1.33.0
-scikit-learn==1.4.2
+streamlit==1.37.0
+scikit-learn==1.5.1
 plotly==5.21.0
 xgboost==2.0.3
 joblib==1.4.2
