@@ -1,138 +1,151 @@
 import streamlit as st
-from src.extraction import extract_pdf_text, write_to_excel
-from src.classification import classify_transactions
-from src.scoring import score_customer
+import pandas as pd
+import tabula
+import os
 import tempfile
-from datetime import datetime
-import plotly.graph_objects as go
-import traceback
+import base64
+import io
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Mama_Mboga Scoring", layout="centered")
+# Set page configuration
+st.set_page_config(page_title="Mama_Mboga Scoring App", layout="wide")
+
+# Title
 st.title("📊 Mama_Mboga Scoring App")
+st.markdown("This app helps process and score MPESA statements to evaluate financial behavior and creditworthiness.")
 
-# Upload PDF & password
-pdf_file = st.file_uploader("Upload MPESA PDF Statement", type=["pdf"])
-pdf_password = st.text_input("Enter PDF Password (if any)", type="password")
+# Step 1: Upload MPESA PDF Statement
+st.header("1️⃣ Upload MPESA PDF Statement")
+uploaded_file = st.file_uploader("Upload your MPESA PDF statement", type=["pdf"])
+password = st.text_input("Enter PDF Password (if required)", type="password")
 
-if pdf_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_file.read())
-        tmp_path = tmp.name
+if uploaded_file:
+    with st.spinner("Reading PDF..."):
+        # Save to a temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_file.read())
+            tmp_path = tmp.name
 
-    try:
-        # Step 1: Extract & Save
-        text = extract_pdf_text(tmp_path, password=pdf_password)
-        excel_path = tmp_path.replace(".pdf", ".xlsx")
-        write_to_excel(text, excel_path)
-        st.success("✅ PDF extracted and saved.")
+        # Extract tables using tabula with password support
+        try:
+            dfs = tabula.read_pdf(tmp_path, pages="all", multiple_tables=True, password=password if password else None)
+            os.remove(tmp_path)
+            if dfs:
+                df = pd.concat(dfs, ignore_index=True)
+                st.success("PDF successfully read and transactions extracted!")
+                st.write("### Extracted Transactions (Preview)")
+                st.dataframe(df.head())
+            else:
+                st.error("No tables found in the PDF.")
+                df = None
+        except Exception as e:
+            st.error(f"Error reading PDF: {e}")
+            df = None
 
-        # Step 2: Parse Transactions
-        parsed_df = classify_transactions(excel_path)[0]
-        if parsed_df.empty:
-            st.warning("⚠️ No valid transactions found.")
-            st.stop()
+    # Proceed only if DataFrame is valid
+    if df is not None:
+        # Step 2: Classify transactions
+        st.header("2️⃣ Classify Transactions")
 
-        # Step 3: Manual Inputs
-        with st.form("manual_inputs"):
-            st.subheader("📦 Business Profile")
-            business_age = st.selectbox("Age of Business (months)", [6, 12, 24, 36])
-            stock_value = st.number_input("Average Daily Stock Value (KES)", min_value=0.0)
+        def classify(row):
+            description = row["Details"] if "Details" in row else row.get("Transaction Details", "")
+            if isinstance(description, str):
+                desc = description.lower()
+                if "loan" in desc or "fuliza" in desc:
+                    return "Loan"
+                elif "received" in desc or "customer" in desc:
+                    return "Income"
+                elif "paid" in desc or "buy" in desc:
+                    return "Expense"
+                elif "withdraw" in desc:
+                    return "Withdraw"
+                elif "deposit" in desc:
+                    return "Deposit"
+            return "Unclassified"
 
-            st.subheader("👥 Neighbour Referrals")
-            neighbor_ability = st.selectbox("Neighbor's Ability to Repay (1–10)", list(range(1, 11)))
-            neighbor_willingness = st.selectbox("Neighbor's Willingness to Repay (1–10)", list(range(1, 11)))
-            familiarity = st.selectbox("Familiarity Level", ["Barely", "Somewhat", "Neutral", "Well", "Very Well"])
-            familiarity_score = {"Barely": 1, "Somewhat": 2, "Neutral": 3, "Well": 4, "Very Well": 5}[familiarity]
+        df["Category"] = df.apply(classify, axis=1)
 
-            st.subheader("🧑‍💼 Loan Officer Review")
-            officer_ability = st.selectbox("Officer's Ability to Repay (1–10)", list(range(1, 11)))
-            officer_willingness = st.selectbox("Officer's Willingness to Repay (1–10)", list(range(1, 11)))
+        st.write("### Review and Edit Classifications")
+        edited_df = st.data_editor(df, num_rows="dynamic")
+        st.session_state["classified_df"] = edited_df
 
-            submit_btn = st.form_submit_button("🧮 Compute Score")
+        # Step 3: Manual Scoring
+        st.header("3️⃣ Manual Scoring")
+        st.markdown("Enter manual scores for each metric below (0 - 10):")
+        income_stability = st.slider("Income Stability", 0, 10, 5)
+        repayment_behavior = st.slider("Repayment Behavior", 0, 10, 5)
+        savings_behavior = st.slider("Savings Behavior", 0, 10, 5)
+        manual_score = (income_stability + repayment_behavior + savings_behavior) / 3
+        st.success(f"Manual Score: **{manual_score:.2f}/10**")
 
-        if submit_btn:
-            # Step 4: Compute MPESA Metrics
-            cashflow = parsed_df["Amount"].abs().sum()
-            balance_avg = parsed_df.set_index("Date")["Balance"].resample("W").mean().tail(4).mean()
-            days_since_last = (datetime.today() - parsed_df["Date"].max()).days
-            p2p_value = parsed_df[
-                parsed_df["Description"].str.contains("Pay Bill", case=False, na=False)
-            ]["Amount"].abs().sum()
+        # Step 4: Auto Score + Final Score
+        st.header("4️⃣ Final Score Calculation")
+        # Remove unnecessary columns and clean up
+        columns_to_keep = ['TRANSACTION TYPE', 'PAID IN', 'PAID OUT', 'Receipt No.',
+                           'Completion Time', 'Details', 'Transaction Status', 'Balance', 'Category']
 
-            # Step 5: Convert to Scores
-            cashflow_score = 5 if cashflow <= 100_000 else 10 if cashflow <= 200_000 else 16
-            balance_score = 4 if balance_avg <= 2000 else 8 if balance_avg <= 5000 else 16
-            recent_score = 4 if days_since_last <= 6 else 2 if days_since_last <= 13 else 0
-            p2p_score = 1 if p2p_value <= 50000 else 2.5 if p2p_value <= 150000 else 4
+        # Filter to only keep useful columns
+        edited_df_clean = edited_df[columns_to_keep].copy()
 
-            metrics = {
-                "business_age_score": 1.25 if business_age <= 11 else 2.5 if business_age <= 23 else 3.75 if business_age <= 35 else 5,
-                "avg_stock_score": 2 if stock_value < 2000 else 4 if stock_value < 4000 else 6 if stock_value < 6000 else 8 if stock_value < 8000 else 10,
-                "neighbor_ability": neighbor_ability,
-                "neighbor_willingness": neighbor_willingness,
-                "neighbor_familiarity": familiarity_score,
-                "officer_ability": officer_ability,
-                "officer_willingness": officer_willingness,
-                "mpesa_cashflow": cashflow_score,
-                "mpesa_balance_avg": balance_score,
-                "mpesa_recent_days": recent_score,
-                "mpesa_p2p": p2p_score
-            }
+        # Fill NaN values in amount columns
+        edited_df_clean['PAID IN'] = edited_df_clean['PAID IN'].fillna(0)
+        edited_df_clean['PAID OUT'] = edited_df_clean['PAID OUT'].fillna(0)
 
-            # Step 6: Final Score + Decision
-            result = score_customer(metrics)
-            score = result["score"]
-            decision = result["decision"]
-            risk = "Low Risk" if score >= 60 else "Moderate Risk" if score >= 50 else "High Risk"
+        # Now calculate your totals
+        income_total = edited_df_clean[edited_df_clean["Category"] == "Income"]["PAID IN"].sum()
+        expense_total = edited_df_clean[edited_df_clean["Category"] == "Expense"]["PAID OUT"].sum()
 
-            st.subheader("✅ Final Scorecard")
-            st.metric("Credit Score", round(score, 2))
-            st.metric("Decision", decision)
-            st.metric("Risk Classification", risk)
+        if expense_total > 0:
+            ratio = income_total / expense_total
+            auto_score = min(10, ratio * 2)
+        else:
+            auto_score = 5
 
-            # Step 7: Score Gauge
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=score,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Credit Score (0–100)"},
-                gauge={
-                    'axis': {'range': [0, 100]},
-                    'bar': {'color': "black"},
-                    'steps': [
-                        {'range': [0, 40], 'color': "#e60000"},
-                        {'range': [40, 50], 'color': "#ff6600"},
-                        {'range': [50, 60], 'color': "#ffcc00"},
-                        {'range': [60, 75], 'color': "#66cc66"},
-                        {'range': [75, 100], 'color': "#009933"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "black", 'width': 4},
-                        'thickness': 0.75,
-                        'value': score
-                    }
-                }
-            ))
-            st.plotly_chart(fig)
+        st.info(f"Auto Score: **{auto_score:.2f}/10**")
+        final_score = (manual_score + auto_score) / 2
+        st.subheader(f"🏁 Final Score: **{final_score:.2f}/10**")
 
-            # Step 8: Show MPESA Summary with Raw Values
-            st.subheader("📄 MPESA Statement Summary (Raw Values)")
-            summary_data = {
-                "Metric": [
-                    "Total Cashflow (IN + OUT)",
-                    "Average Weekly Balance",
-                    "Days Since Last Transaction",
-                    "Total Paybill (IN + OUT)"
-                ],
-                "Value": [
-                    f"{cashflow:,.0f} KES",
-                    f"{balance_avg:,.0f} KES",
-                    f"{days_since_last} days",
-                    f"{p2p_value:,.0f} KES"
-                ]
-            }
-            st.table(summary_data)
+        # Step 5: Visualization
+        st.header("5️⃣ Results Visualization")
+        st.markdown("### Category Distribution")
+        category_counts = edited_df_clean["Category"].value_counts()
 
-    except Exception as e:
-        st.error("❌ An error occurred.")
-        st.code(traceback.format_exc())
+        # Create summary table
+        summary_data = {
+            "Category": category_counts.index,
+            "Number of Transactions": category_counts.values,
+            "Percentage": (category_counts.values / category_counts.sum() * 100).round(2)
+        }
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(summary_df, use_container_width=True)
+
+        # Financial Summary Table
+        st.markdown("### Financial Summary")
+        financial_summary = []
+        for category in edited_df_clean["Category"].unique():
+            category_data = edited_df_clean[edited_df_clean["Category"] == category]
+            # Convert to numeric, coerce errors to NaN, then fill NaN with 0
+            paid_in = pd.to_numeric(category_data["PAID IN"], errors='coerce').fillna(0).sum()
+            paid_out = pd.to_numeric(category_data["PAID OUT"], errors='coerce').fillna(0).sum()
+            net_amount = paid_in - paid_out
+
+            financial_summary.append({
+                "Category": category,
+                "Total Paid In": f"KSh {paid_in:,.2f}",
+                "Total Paid Out": f"KSh {paid_out:,.2f}",
+                "Net Amount": f"KSh {net_amount:,.2f}"
+            })
+
+        financial_df = pd.DataFrame(financial_summary)
+        st.dataframe(financial_df, use_container_width=True)
+
+        # Download
+        st.markdown("### ⬇️ Download Classified Data")
+        csv_buffer = io.StringIO()
+        edited_df_clean.to_csv(csv_buffer, index=False)
+        b64 = base64.b64encode(csv_buffer.getvalue().encode()).decode()
+        st.markdown(f'<a href="data:file/csv;base64,{b64}" download="classified_transactions.csv">Download CSV File</a>', unsafe_allow_html=True)
+
+else:
+    st.info("Please upload an MPESA PDF statement to get started.")
+
