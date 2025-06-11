@@ -1,28 +1,47 @@
 import pandas as pd
-from datetime import datetime, timedelta
 import re
+from datetime import datetime
 
-def classify_transactions(excel_file):
-    df = pd.read_excel(excel_file, header=None)
-    today = datetime.today()
+def classify_transactions(excel_file_path: str) -> pd.DataFrame:
+    """
+    Cleans and classifies transactions from extracted MPESA Excel data.
 
-    detailed_rows = df[df[0].astype(str).str.match(r"^TF|^07|^\d{2}/\d{2}/\d{4}", na=False)].copy()
-    detailed_rows.columns = ["Raw"]
+    Args:
+        excel_file_path (str): Path to the extracted Excel file with raw text in column A.
 
-    records = []
-    for line in detailed_rows["Raw"]:
-        match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.+?)Completed ([-\d.]+) (\d+\.\d+)?$', line)
+    Returns:
+        pd.DataFrame: Cleaned DataFrame with columns:
+                      ['Completion Time', 'Description', 'PAID IN', 'WITHDRAWN', 'BALANCE']
+    """
+    # Step 1: Load raw lines
+    df_raw = pd.read_excel(excel_file_path, header=None, names=['Raw'])
+
+    transactions = []
+
+    # Step 2: Loop through lines and parse valid transaction entries
+    for line in df_raw['Raw'].astype(str):
+        match = re.search(
+            r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(.*?)\s+Completed\s+(-?\d+\.\d+)\s+(\d+\.\d+)?',
+            line
+        )
         if match:
-            time_str = match.group(1)
-            desc = match.group(2).strip()
-            amount = float(match.group(3))
-            balance = float(match.group(4)) if match.group(4) else None
-            records.append({
-                "Date": pd.to_datetime(time_str),
-                "Description": desc,
-                "Amount": amount,
-                "Balance": balance
+            date_str, desc, amount_str, balance_str = match.groups()
+            date = pd.to_datetime(date_str)
+            amount = float(amount_str)
+            balance = float(balance_str) if balance_str else None
+
+            transactions.append({
+                'Completion Time': date,
+                'Description': desc.strip(),
+                'PAID IN': amount if amount > 0 else 0,
+                'WITHDRAWN': abs(amount) if amount < 0 else 0,
+                'BALANCE': balance
             })
 
-    parsed_df = pd.DataFrame(records)
-    return parsed_df, df  # ✅ MUST return a tuple
+    # Step 3: Validate results
+    if not transactions:
+        raise ValueError("❌ No valid transaction lines found in the Excel file.")
+
+    # Step 4: Return cleaned DataFrame
+    df_clean = pd.DataFrame(transactions)
+    return df_clean
