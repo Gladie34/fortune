@@ -173,7 +173,7 @@ if uploaded_file:
                     result = score_customer(metrics)
                     final_score = result['score']
                     decision = result['decision']
-                    risk = "Low Risk" if final_score >= 60 else "Moderate Risk" if final_score >= 50 else "High Risk"
+                    risk = "Low Risk" if final_score >= 70 else "Moderate Risk" if final_score >= 60 else "High Risk"
 
                     st.header("3️⃣ Credit Score Result")
                     fig = go.Figure(go.Indicator(

@@ -20,6 +20,6 @@ def score_customer(metrics: dict) -> dict:
     score += metrics['mpesa_recent_days']
 
 
-    decision = "Approved (KES 5000)" if score >=50 else "Denied (KES 0)"
+    decision = "Approved (KES 5000)" if score >=60 else "Denied (KES 0)"
 
     return {"score": round(score, 2), "decision": decision}
