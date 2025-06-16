@@ -6,6 +6,10 @@ import tempfile
 import plotly.graph_objects as go
 from datetime import datetime
 from src.scoring import score_customer
+from fpdf import FPDF
+import base64
+import io
+import plotly.io as pio
 
 st.set_page_config(page_title="Mama_Mboga Scoring App", layout="wide")
 st.title("📊 Mama_Mboga Scoring App")
@@ -14,6 +18,35 @@ st.markdown("This app processes and scores MPESA statements to evaluate creditwo
 st.header("1️⃣ Upload MPESA PDF Statement")
 uploaded_file = st.file_uploader("Upload your MPESA PDF statement", type=["pdf"])
 password = st.text_input("Enter PDF Password (if required)", type="password")
+
+def generate_pdf(score, decision, risk, summary_data, customer_name, timestamp, chart_path=None):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, txt="Mama Mboga Credit Score Report", ln=True, align='C')
+    pdf.ln(5)
+
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 10, f"Customer Name: {customer_name}", ln=True)
+    pdf.cell(200, 10, f"Report Generated: {timestamp}", ln=True)
+    pdf.cell(200, 10, f"Credit Score: {score}", ln=True)
+    pdf.cell(200, 10, f"Decision: {decision}", ln=True)
+    pdf.cell(200, 10, f"Risk Classification: {risk}", ln=True)
+
+    if chart_path:
+        pdf.ln(5)
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(200, 10, "Credit Score Gauge:", ln=True)
+        pdf.image(chart_path, x=10, w=180)
+
+    pdf.ln(10)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, "MPESA Summary:", ln=True)
+    pdf.set_font("Arial", "", 11)
+    for i, row in summary_data.iterrows():
+        pdf.cell(200, 10, f"{row['Metric']}: {row['Value (KES)']}", ln=True)
+
+    return pdf.output(dest="S").encode("latin1")
 
 if uploaded_file:
     with st.spinner("Reading PDF..."):
@@ -59,7 +92,7 @@ if uploaded_file:
                 df['TRANSACTION_TYPE'] = df[col_map['transaction_type']].astype(str)
 
                 def classify(row):
-                    combined = f"{row['DETAILS']} {row['TRANSACTION_TYPE']}".lower()
+                    combined = f"{row['DETAILS']} {row['TRANSACTION_TYPE']}`".lower()
                     if 'loan' in combined or 'fuliza' in combined:
                         return 'Loan'
                     elif 'received' in combined or 'deposit' in combined or 'reversal' in combined:
@@ -104,6 +137,7 @@ if uploaded_file:
                 st.header("2️⃣ Manual Input")
                 with st.form("manual_inputs"):
                     st.subheader("📟 Business Profile")
+                    customer_name = st.text_input("Customer Name")
                     business_age = st.number_input("Age of Business (months)", min_value=0.0)
                     stock_value = st.number_input("Average Daily Stock Value (KES)", min_value=0.0)
 
@@ -163,8 +197,7 @@ if uploaded_file:
                     st.metric("Decision", decision)
                     st.metric("Risk Classification", risk)
 
-                    st.subheader("📋 MPESA Summary Metrics")
-                    mpesa_summary = pd.DataFrame({
+                    summary_df = pd.DataFrame({
                         "Metric": ["Total Paid In", "Total Withdrawn", "Cashflow Volume", "Net Cashflow", "Avg Weekly Balance", "Days Since Last Txn"],
                         "Value (KES)": [
                             f"{total_in:,.0f}",
@@ -175,7 +208,19 @@ if uploaded_file:
                             f"{days_since_last} days"
                         ]
                     })
-                    st.table(mpesa_summary)
+                    st.subheader("📋 MPESA Summary Metrics")
+                    st.table(summary_df)
+
+                    chart_path = f"/tmp/{customer_name.replace(' ', '_')}_gauge.png"
+                    fig.write_image(chart_path)
+
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    pdf_bytes = generate_pdf(final_score, decision, risk, summary_df, customer_name, timestamp, chart_path)
+                    b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                    href = f'<a href="data:application/octet-stream;base64,{b64_pdf}" download="credit_report.pdf">📄 Download Credit Report (PDF)</a>'
+                    st.markdown(href, unsafe_allow_html=True)
+
+                    os.remove(chart_path)
 
         except Exception as e:
             st.error(f"❌ Error: {e}")
